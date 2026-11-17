@@ -5,6 +5,7 @@ import { getJson, postJson } from '../api'
 const runs = ref([])
 const accounts = ref([])
 const merges = ref([])
+const proof = ref(null)
 const err = ref('')
 const msg = ref('')
 const busy = ref(false)
@@ -43,7 +44,7 @@ async function runSettle(failure) {
   try {
     const url = failure ? '/api/settle-runs?simulate_failure=true' : '/api/settle-runs'
     const r = await postJson(url)
-    msg.value = `归并完成 #${r.id}：净额 ${yuan(r.net_cents)} 已写入配平暂存，隔离 ${r.quarantine_count}；账户余额余额未动`
+    msg.value = `归并完成 #${r.id}：净额 ${yuan(r.net_cents)} 已写入配平暂存，隔离 ${r.quarantine_count}；已对外余额未动`
     await load()
   } catch (e) {
     err.value = String(e.message || e)
@@ -61,6 +62,19 @@ async function merge(failure) {
     const m = await postJson(url)
     msg.value = `合并完成 #${m.id}：已对外 ${yuan(m.posted_before_cents)} → ${yuan(m.posted_after_cents)}，暂存清零 ${yuan(m.staged_total_cents)}`
     await load()
+  } catch (e) {
+    err.value = String(e.message || e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function openProof(id) {
+  busy.value = true
+  err.value = ''
+  try {
+    const m = await getJson(`/api/balance-merges/${id}`)
+    proof.value = m.证明
   } catch (e) {
     err.value = String(e.message || e)
   } finally {
@@ -161,12 +175,17 @@ function yuan(cents) {
     </div>
 
     <div class="panel">
-      <h2>合并批次</h2>
+      <h2>合并批次与证明</h2>
+      <p class="note-strip">
+        每批落库合并前/后 已对外与暂存四值（合并证明，按批次只读查询）；
+        合并与清零在同一事务、同一条更新内完成，失败整体回滚，暂存回到合并前，已对外不变。
+      </p>
       <table>
         <thead>
           <tr>
             <th>#</th><th>状态</th><th>账户数</th><th>暂存合计（元）</th>
-            <th>已对外前（元）</th><th>已对外后（元）</th><th>结束</th>
+            <th>合并前已对外（元）</th><th>合并前暂存（元）</th>
+            <th>合并后已对外（元）</th><th>合并后暂存（元）</th><th>结束</th><th>证明</th>
           </tr>
         </thead>
         <tbody>
@@ -176,12 +195,41 @@ function yuan(cents) {
             <td>{{ m.account_count }}</td>
             <td>{{ yuan(m.staged_total_cents) }}</td>
             <td>{{ yuan(m.posted_before_cents) }}</td>
+            <td>{{ yuan(m.staging_before_cents) }}</td>
             <td>{{ yuan(m.posted_after_cents) }}</td>
+            <td><span class="amount-cell zero">{{ yuan(m.staging_after_cents) }}</span></td>
             <td>{{ m.finished_at || '—' }}</td>
+            <td><button class="btn secondary" :disabled="busy" @click="openProof(m.id)">查看证明</button></td>
           </tr>
-          <tr v-if="!merges.length"><td colspan="7">尚无合并批次</td></tr>
+          <tr v-if="!merges.length"><td colspan="10">尚无合并批次</td></tr>
         </tbody>
       </table>
+
+      <div v-if="proof" class="proof-box">
+        <h3>批次 #{{ proof.合并批次id }} 合并证明 · 对外口径：{{ proof.对外口径 }}</h3>
+        <p class="note-strip">
+          合并前 已对外 ¥{{ yuan(proof.合并前已对外分) }} + 暂存 ¥{{ yuan(proof.合并前暂存分) }}
+          → 合并后 已对外 ¥{{ yuan(proof.合并后已对外分) }}，暂存 ¥{{ yuan(proof.合并后暂存分) }}（清零）
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>账户</th><th>合并前已对外（元）</th><th>合并前暂存（元）</th>
+              <th>合并后已对外（元）</th><th>合并后暂存（元）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="line in proof.分户" :key="line.account_id">
+              <td>{{ line.account_code }}</td>
+              <td>{{ yuan(line.合并前已对外分) }}</td>
+              <td>{{ yuan(line.合并前暂存分) }}</td>
+              <td>{{ yuan(line.合并后已对外分) }}</td>
+              <td><span class="amount-cell zero">{{ yuan(line.合并后暂存分) }}</span></td>
+            </tr>
+            <tr v-if="!proof.分户.length"><td colspan="5">本批无待合并暂存（空合并）</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </template>

@@ -19,12 +19,18 @@ BASIS_POSTED = "已对外余额"
 
 @dataclass(frozen=True)
 class MergeLine:
-    """合并的一行：暂存并入已对外，合并后暂存必为 0。"""
+    """合并的一行：暂存并入已对外，合并后暂存必为 0。
+
+    四个金额即该账户的合并证明快照（同源派生，不另起余额表）：
+    合并前已对外 / 合并前暂存 → 合并后已对外 / 合并后暂存（恒为 0）。
+    """
 
     account_id: int
     staged_cents: int
     posted_before_cents: int
     posted_after_cents: int
+    staging_before_cents: int = 0
+    staging_after_cents: int = 0
 
 
 def merge_plan(rows: list[dict]) -> list[MergeLine]:
@@ -40,6 +46,8 @@ def merge_plan(rows: list[dict]) -> list[MergeLine]:
                 staged_cents=staged,
                 posted_before_cents=before,
                 posted_after_cents=before + staged,
+                staging_before_cents=staged,
+                staging_after_cents=0,
             )
         )
     return plan

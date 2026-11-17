@@ -67,8 +67,9 @@ def dashboard() -> dict:
             "冲正笔数": rev,
             "待归并": pending,
             "未平隔离": q,
-            "已对外余额合计分": totals["total_cents"],
-            "暂存余额合计分": 0,
+            # 对外口径只读已对外余额；暂存与合计分列，合计仅供内部核对，不冒充对外。
+            "已对外余额合计分": totals["posted_cents"],
+            "暂存余额合计分": totals["staging_cents"],
             "余额合计分": totals["total_cents"],
             "待合并账户数": totals["staged_accounts"],
             "对外口径": "已对外余额",
@@ -240,10 +241,11 @@ def run_settle(simulate_failure: bool = False) -> dict:
 
         staging_total = 0
         for acc_id, net in account_net.items():
+            # 归并净额只入配平暂存，已对外余额本趟绝不触碰。
             conn.execute(
                 """
                 UPDATE accounts
-                SET posted_cents = posted_cents + ?, last_settle_run_id = ?
+                SET staging_cents = staging_cents + ?, last_settle_run_id = ?
                 WHERE id = ?
                 """,
                 (net, run_id, acc_id),
@@ -324,15 +326,42 @@ def get_balance_merge(merge_id: int) -> dict:
         )
         out = dict(row)
         out["items"] = items
+        # 合并证明：按合并批次 id 的只读视图，四值同源派生自已落库的批次/分户快照。
+        out["证明"] = _merge_proof(out, items)
         return out
+
+
+def _merge_proof(header: dict, items: list[dict]) -> dict:
+    return {
+        "合并批次id": header["id"],
+        "账户数": header["account_count"],
+        "合并前已对外分": header["posted_before_cents"],
+        "合并前暂存分": header["staging_before_cents"],
+        "合并后已对外分": header["posted_after_cents"],
+        "合并后暂存分": header["staging_after_cents"],
+        "对外口径": "已对外余额",
+        "分户": [
+            {
+                "account_id": it["account_id"],
+                "account_code": it["account_code"],
+                "合并前已对外分": it["posted_before_cents"],
+                "合并前暂存分": it["staging_before_cents"],
+                "合并后已对外分": it["posted_after_cents"],
+                "合并后暂存分": it["staging_after_cents"],
+            }
+            for it in items
+        ],
+    }
 
 
 def merge_staging(simulate_failure: bool = False) -> dict:
     """显式合并：配平暂存并入已对外余额并清零暂存。
 
-    同一事务、同一条 UPDATE 同时完成「并入」与「清零」：
-    不会出现已对外已变而暂存未清，也不会出现暂存被直接当做已对外展示。
-    任一步失败整体回滚，暂存与已对外都回到合并前。
+    路径取「合并单步完成」：同一事务、同一条 UPDATE 完成
+    ``posted = posted + staging; staging = 0``——并入与清零同生共死，
+    不会出现已对外已变而暂存未清，也不会把暂存直接当已对外展示。
+    合并证明（合并前/后已对外与暂存）与余额切换在同一事务内落库，
+    任一步失败整体回滚，暂存与已对外都回到合并前，不留下本趟污染。
     """
     conn = connect()
     merge_id: int | None = None
@@ -347,6 +376,7 @@ def merge_staging(simulate_failure: bool = False) -> dict:
         )
         plan = dual_rail.merge_plan(accounts)
         posted_before_total = sum(r["posted_cents"] for r in accounts)
+        staging_before_total = sum(r["staging_cents"] for r in accounts)
 
         cur = conn.execute(
             "INSERT INTO balance_merges(status, started_at) VALUES ('进行中', ?)", (now,)
@@ -355,10 +385,13 @@ def merge_staging(simulate_failure: bool = False) -> dict:
 
         staged_total = 0
         for idx, line in enumerate(plan):
+            # 同一条 UPDATE 同时完成并入与清零；WHERE 对暂存旧值做乐观校验，
+            # 若期间被并发改动则 rowcount=0，中止并整体回滚，杜绝半截合并。
             updated = conn.execute(
                 """
                 UPDATE accounts
                 SET posted_cents = posted_cents + staging_cents,
+                    staging_cents = 0,
                     last_merge_id = ?
                 WHERE id = ? AND staging_cents = ?
                 """,
@@ -369,8 +402,10 @@ def merge_staging(simulate_failure: bool = False) -> dict:
             conn.execute(
                 """
                 INSERT INTO balance_merge_items(
-                  merge_id, account_id, staged_cents, posted_before_cents, posted_after_cents
-                ) VALUES (?, ?, ?, ?, ?)
+                  merge_id, account_id, staged_cents,
+                  posted_before_cents, posted_after_cents,
+                  staging_before_cents, staging_after_cents
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     merge_id,
@@ -378,13 +413,17 @@ def merge_staging(simulate_failure: bool = False) -> dict:
                     line.staged_cents,
                     line.posted_before_cents,
                     line.posted_after_cents,
+                    line.staging_before_cents,
+                    line.staging_after_cents,
                 ),
             )
             staged_total += line.staged_cents
             if simulate_failure and idx == 0:
                 raise HTTPException(500, "演练：合并失败，已对外余额与配平暂存均已回滚")
 
+        # 合并后：已对外 = 合并前已对外 + 合并前暂存；暂存恒清零。
         posted_after_total = posted_before_total + staged_total
+        staging_after_total = staging_before_total - staged_total
         conn.execute(
             """
             UPDATE balance_merges
@@ -393,6 +432,8 @@ def merge_staging(simulate_failure: bool = False) -> dict:
                 staged_total_cents = ?,
                 posted_before_cents = ?,
                 posted_after_cents = ?,
+                staging_before_cents = ?,
+                staging_after_cents = ?,
                 finished_at = ?,
                 note = ?
             WHERE id = ?
@@ -402,6 +443,8 @@ def merge_staging(simulate_failure: bool = False) -> dict:
                 staged_total,
                 posted_before_total,
                 posted_after_total,
+                staging_before_total,
+                staging_after_total,
                 _now(),
                 "无待合并暂存" if not plan else "",
                 merge_id,
@@ -481,8 +524,10 @@ def run_verify(settle_run_id: int | None = None) -> dict:
 
         consistent = 1 if (all_ledger_net == total and not mismatched_accounts) else 0
         detail = {
-            "对外口径": "双余额合计",
-            "说明": "对外展示以账户余额合计为准。",
+            # 对外口径只读已对外余额；「已对外 + 暂存」合计仅用于内部同源核对，
+            # 任何对外读接口/互证返回都不得拿合计冒充已对外。
+            "对外口径": "已对外余额",
+            "说明": "对外展示只认已对外余额；配平暂存与双余额合计仅供内部核对。",
             "本轮正向分": fwd_sum,
             "本轮冲正分": rev_sum,
             "本轮流水净额分": ledger_net,

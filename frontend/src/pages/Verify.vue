@@ -28,8 +28,8 @@ async function runVerify() {
     const r = await postJson('/api/verify-reports')
     latest.value = r
     msg.value = r.consistent
-      ? `互证一致：流水净额 ${yuan(r.ledger_net_cents)} = 账户余额 ${yuan(r.posted_cents)} + 暂存 ${yuan(r.staging_cents)}`
-      : `互证不一致：流水 ${yuan(r.ledger_net_cents)} vs 已对外+暂存 ${yuan(r.total_cents)}`
+      ? `互证一致：流水净额 ${yuan(r.ledger_net_cents)} = 已对外 ${yuan(r.posted_cents)} + 暂存 ${yuan(r.staging_cents)}（内部核对）`
+      : `互证不一致：流水 ${yuan(r.ledger_net_cents)} vs 已对外+暂存 ${yuan(r.total_cents)}（内部核对）`
     await load()
   } catch (e) {
     err.value = String(e.message || e)

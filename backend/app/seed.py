@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS balance_merges (
   staged_total_cents INTEGER NOT NULL DEFAULT 0,
   posted_before_cents INTEGER NOT NULL DEFAULT 0,
   posted_after_cents INTEGER NOT NULL DEFAULT 0,
+  staging_before_cents INTEGER NOT NULL DEFAULT 0,
+  staging_after_cents INTEGER NOT NULL DEFAULT 0,
   started_at TEXT NOT NULL,
   finished_at TEXT,
   note TEXT NOT NULL DEFAULT ''
@@ -83,7 +85,9 @@ CREATE TABLE IF NOT EXISTS balance_merge_items (
   account_id INTEGER NOT NULL REFERENCES accounts(id),
   staged_cents INTEGER NOT NULL,
   posted_before_cents INTEGER NOT NULL,
-  posted_after_cents INTEGER NOT NULL
+  posted_after_cents INTEGER NOT NULL,
+  staging_before_cents INTEGER NOT NULL DEFAULT 0,
+  staging_after_cents INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_balance_merge_items_merge
   ON balance_merge_items(merge_id);
@@ -195,11 +199,39 @@ def _migrate_verify_reports(conn) -> None:
     conn.commit()
 
 
+def _migrate_balance_merges(conn) -> None:
+    """合并证明补列：批次/分户都要带合并前/后暂存，旧审计表用 ALTER 补齐。
+
+    历史合并批次没有暂存快照，暂存前后按 0 落列，不改动任何余额。
+    """
+    merge_cols = _columns(conn, "balance_merges")
+    if merge_cols and "staging_before_cents" not in merge_cols:
+        conn.execute(
+            "ALTER TABLE balance_merges ADD COLUMN staging_before_cents INTEGER NOT NULL DEFAULT 0"
+        )
+    if merge_cols and "staging_after_cents" not in merge_cols:
+        conn.execute(
+            "ALTER TABLE balance_merges ADD COLUMN staging_after_cents INTEGER NOT NULL DEFAULT 0"
+        )
+
+    item_cols = _columns(conn, "balance_merge_items")
+    if item_cols and "staging_before_cents" not in item_cols:
+        conn.execute(
+            "ALTER TABLE balance_merge_items ADD COLUMN staging_before_cents INTEGER NOT NULL DEFAULT 0"
+        )
+    if item_cols and "staging_after_cents" not in item_cols:
+        conn.execute(
+            "ALTER TABLE balance_merge_items ADD COLUMN staging_after_cents INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.commit()
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         _migrate_accounts(conn)
         _migrate_verify_reports(conn)
+        _migrate_balance_merges(conn)
 
         n = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
         if n:

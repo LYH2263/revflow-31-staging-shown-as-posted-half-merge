@@ -50,10 +50,25 @@ npm run dev
 
 接口：
 
-- `GET /api/accounts`、`GET /api/staging` — 分列两套余额（含合计）
+- `GET /api/accounts`、`GET /api/staging` — 分列两套余额（含合计），对外口径只取已对外
 - `POST /api/settle-runs[?simulate_failure=true]` — 跑归并，净额只写暂存
 - `POST /api/balance-merges[?simulate_failure=true]` — 显式合并暂存到已对外
-- `POST /api/verify-reports` — 互证报告，分别给出已对外 / 暂存 / 合计并声明对外口径
+- `GET /api/balance-merges/{id}` — **合并证明只读接口**：按合并批次 id 返回
+  该批「合并前已对外/暂存 → 合并后已对外/暂存」四值及逐户明细（`证明` 字段），
+  数字与账户双列同源派生，库里只有一套余额，证明是快照不是第二套余额
+- `POST /api/verify-reports` — 互证报告，分别给出已对外 / 暂存 / 合计并声明对外口径（已对外余额）
+
+## 合并证明实体
+
+`balance_merges`（批次）与 `balance_merge_items`（分户）共同构成合并证明，每批记录四值：
+
+| 时点 | 已对外 | 暂存 |
+| --- | --- | --- |
+| 合并前 | `posted_before_cents` | `staging_before_cents` |
+| 合并后 | `posted_after_cents` | `staging_after_cents`（恒为 0） |
+
+证明与余额切换在**同一事务**内落库：合并成功才会留下证明，合并失败（含演练）整体回滚，
+不会出现「已对外已变、暂存未清」的半截状态或一份对不上账的证明。
 
 旧库（单列 `balance_cents`）启动时自动迁移为双列：旧余额落 `posted_cents`，暂存置 0。
 

@@ -333,6 +333,19 @@ h1 {
   font-weight: 700;
 }
 
+.proof-box {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--accent);
+  background: var(--paper);
+}
+.proof-box h3 {
+  margin: 0 0 8px;
+  font-family: var(--display);
+  font-size: 15px;
+  letter-spacing: 0.05em;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
